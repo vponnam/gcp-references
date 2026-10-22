@@ -20,6 +20,15 @@ Pod scaling has a similar catch: CPU and memory metrics don't reflect GPU load d
 
 The two manifests in this folder let you test the entire flow in minutes using a lightweight mock metrics adapter and dummy GPU pods.
 
+### Example Scenario
+
+Suppose you are running an LLM inference service with **1 GPU pod** that can handle **5 QPS** (with an HPA target of `5` waiting requests per pod):
+
+1. **Traffic Spikes (`queue_depth = 15`)**: A burst of requests arrives. Because the single pod is maxed out at 5 QPS, **15 requests** back up in the queue.
+2. **HPA Scales Pods (`1 -> 3` replicas)**: HPA reads `queue_depth = 15` and calculates $\lceil 15 / 5 \rceil = 3$ pods needed to reach 15 QPS. It creates **2 new GPU pods**, which go `Pending` if existing GPU nodes are full.
+3. **CCC Scales Nodes via NAP**: GKE Node Auto-Provisioning (NAP) sees the `Pending` pods and evaluates the Custom Compute Class priority list (**Reserved $\rightarrow$ DWS Flex-Start $\rightarrow$ Spot**) to spin up new GPU nodes.
+4. **Queue Clears**: Once the new nodes boot, the 2 new pods start serving traffic, clearing the 15-request queue. When traffic drops, HPA scales back to 1 pod and CCC removes the extra GPU nodes.
+
 ---
 
 ## How the Configs Work
