@@ -1,0 +1,71 @@
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: g4-inference-res-dws
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  activeMigration:
+    optimizeRulePriority: true
+  autoscalingPolicy:
+    consolidationDelayMinutes: 5
+    consolidationThreshold: 70
+    gpuConsolidationThreshold: 100
+  nodePoolConfig:
+    serviceAccount: <NODE_SERVICE_ACCOUNT>@<PROJECT_ID>.iam.gserviceaccount.com
+    imageType: cos_containerd
+    gvnic:
+      enabled: true
+  priorities:
+    # Priority 1: Consume Automatic GPU Reservation in us-south1-a
+    # Note: When a reservation has specificReservationRequired: false (automatic consumption),
+    # GKE requires reservations.affinity: AnyBestEffort rather than affinity: Specific.
+    - machineType: g4-standard-384
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 8
+        driverVersion: latest
+      storage:
+        localSSDCount: 32
+        bootDiskType: hyperdisk-balanced
+        bootDiskSize: 100
+      location:
+        zones: ['us-south1-a']
+      reservations:
+        affinity: AnyBestEffort
+
+    # Priority 2: Fallback to DWS Flex-Start (g4-standard-96 across us-south1-a/b)
+    - machineType: g4-standard-96
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 2
+        driverVersion: latest
+      storage:
+        localSSDCount: 8
+        bootDiskType: hyperdisk-balanced
+        bootDiskSize: 100
+      location:
+        zones: ['us-south1-a', 'us-south1-b']
+        locationPolicy: ANY
+      capacityCheckWaitTimeSeconds: 180
+      maxRunDurationSeconds: 86400
+      flexStart:
+        enabled: true
+        nodeRecycling:
+          leadTimeSeconds: 1800
+
+    # Priority 3: Fallback to Spot GPUs (g4-standard-96 across us-south1-a/b)
+    - machineType: g4-standard-96
+      gpu:
+        type: nvidia-rtx-pro-6000
+        count: 2
+        driverVersion: latest
+      storage:
+        localSSDCount: 8
+        bootDiskType: hyperdisk-balanced
+        bootDiskSize: 100
+      location:
+        zones: ['us-south1-a', 'us-south1-b']
+      spot: true
+
+  whenUnsatisfiable: DoNotScaleUp

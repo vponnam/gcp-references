@@ -1,0 +1,60 @@
+# OS & Editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local AI / Agent directories
+.gemini/
+.agents/
+_agents/
+
+# Credentials, Keys & Kubeconfigs (prevent accidental secret leaks)
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*credentials*.json
+*service-account*.json
+*sa-key*.json
+kubeconfig*
+.kube/
+
+# Terraform / Infrastructure as Code
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Logs & Temporary files
+*.log
+*.bak
+*.tmp
+*.orig
+tmp/
+scratch/

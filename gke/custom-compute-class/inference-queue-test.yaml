@@ -1,0 +1,370 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-custom-metrics-sa
+  namespace: default
+  labels:
+    test-suite: ccc-res-dws
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vllm-custom-metrics-reader
+  labels:
+    test-suite: ccc-res-dws
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vllm-custom-metrics-reader-binding
+  labels:
+    test-suite: ccc-res-dws
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vllm-custom-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: vllm-custom-metrics-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vllm-custom-metrics-server-resources
+  labels:
+    test-suite: ccc-res-dws
+rules:
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpa-controller-vllm-custom-metrics
+  labels:
+    test-suite: ccc-res-dws
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vllm-custom-metrics-server-resources
+subjects:
+  - kind: ServiceAccount
+    name: horizontal-pod-autoscaler
+    namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-queue-adapter-code
+  namespace: default
+  labels:
+    test-suite: ccc-res-dws
+data:
+  adapter.py: |
+    import datetime
+    import json
+    import os
+    import ssl
+    import subprocess
+    import threading
+    import urllib.parse
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    queue_depth_per_pod = 2  # Initial queue depth per pod (below threshold of 5)
+
+    # Generate self-signed cert for APIService HTTPS
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", "/tmp/key.pem", "-out", "/tmp/cert.pem",
+        "-days", "7", "-nodes", "-subj", "/CN=vllm-custom-metrics-svc.default.svc"
+    ], check=True)
+
+    def get_k8s_pods(namespace="default", label_selector="app=vllm-inference-test"):
+        token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+        ctx = ssl.create_default_context(cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+        url = f"https://kubernetes.default.svc/api/v1/namespaces/{namespace}/pods?labelSelector={urllib.parse.quote(label_selector)}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+            return json.loads(resp.read().decode()).get("items", [])
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            global queue_depth_per_pod
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if path == "/set":
+                qs = urllib.parse.parse_qs(parsed.query)
+                if "depth" in qs:
+                    queue_depth_per_pod = int(qs["depth"][0])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(f"queue_depth_per_pod={queue_depth_per_pod}\n".encode())
+                return
+
+            if path == "/metrics":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.end_headers()
+                body = (
+                    "# HELP vllm:num_requests_waiting Number of requests waiting in inference queue\n"
+                    "# TYPE vllm:num_requests_waiting gauge\n"
+                    f"vllm:num_requests_waiting {queue_depth_per_pod}\n"
+                )
+                self.wfile.write(body.encode())
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+
+            if path in ("/apis/custom.metrics.k8s.io/v1beta1", "/apis/custom.metrics.k8s.io/v1beta1/"):
+                resp = {
+                    "kind": "APIResourceList",
+                    "apiVersion": "v1",
+                    "groupVersion": "custom.metrics.k8s.io/v1beta1",
+                    "resources": [
+                        {
+                            "name": "pods/vllm_num_requests_waiting",
+                            "singularName": "",
+                            "namespaced": True,
+                            "kind": "MetricValueList",
+                            "verbs": ["get", "list"]
+                        },
+                        {
+                            "name": "services/vllm_num_requests_waiting",
+                            "singularName": "",
+                            "namespaced": True,
+                            "kind": "MetricValueList",
+                            "verbs": ["get", "list"]
+                        }
+                    ]
+                }
+                self.wfile.write(json.dumps(resp).encode())
+                return
+
+            if "vllm_num_requests_waiting" in path:
+                items = []
+                if "/services/" in path:
+                    items.append({
+                        "describedObject": {
+                            "kind": "Service",
+                            "namespace": "default",
+                            "name": "vllm-custom-metrics-svc",
+                            "apiVersion": "/v1"
+                        },
+                        "metricName": "vllm_num_requests_waiting",
+                        "timestamp": now,
+                        "value": str(queue_depth_per_pod)
+                    })
+                else:
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    selector = qs.get("labelSelector", ["app=vllm-inference-test"])[0]
+                    pods = get_k8s_pods("default", selector)
+                    for p in pods:
+                        items.append({
+                            "describedObject": {
+                                "kind": "Pod",
+                                "namespace": "default",
+                                "name": p["metadata"]["name"],
+                                "apiVersion": "/v1"
+                            },
+                            "metricName": "vllm_num_requests_waiting",
+                            "timestamp": now,
+                            "value": str(queue_depth_per_pod)
+                        })
+                resp = {
+                    "kind": "MetricValueList",
+                    "apiVersion": "custom.metrics.k8s.io/v1beta1",
+                    "metadata": {"selfLink": path},
+                    "items": items
+                }
+                self.wfile.write(json.dumps(resp).encode())
+                return
+
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+
+    def run_http():
+        HTTPServer(("0.0.0.0", 8000), MetricsHandler).serve_forever()
+
+    def run_https():
+        httpd = HTTPServer(("0.0.0.0", 6443), MetricsHandler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile="/tmp/cert.pem", keyfile="/tmp/key.pem")
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        httpd.serve_forever()
+
+    threading.Thread(target=run_http, daemon=True).start()
+    run_https()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-custom-metrics-adapter
+  namespace: default
+  labels:
+    app: vllm-custom-metrics-adapter
+    test-suite: ccc-res-dws
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-custom-metrics-adapter
+  template:
+    metadata:
+      labels:
+        app: vllm-custom-metrics-adapter
+        test-suite: ccc-res-dws
+    spec:
+      serviceAccountName: vllm-custom-metrics-sa
+      containers:
+        - name: adapter
+          image: python:3.11-slim
+          command: ["python3", "/app/adapter.py"]
+          ports:
+            - containerPort: 6443
+              name: https
+            - containerPort: 8000
+              name: metrics
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: vllm-queue-adapter-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-custom-metrics-svc
+  namespace: default
+  labels:
+    app: vllm-custom-metrics-adapter
+    test-suite: ccc-res-dws
+spec:
+  selector:
+    app: vllm-custom-metrics-adapter
+  ports:
+    - name: https
+      port: 443
+      targetPort: 6443
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.custom.metrics.k8s.io
+  labels:
+    test-suite: ccc-res-dws
+spec:
+  service:
+    name: vllm-custom-metrics-svc
+    namespace: default
+  group: custom.metrics.k8s.io
+  version: v1beta1
+  insecureSkipTLSVerify: true
+  groupPriorityMinimum: 100
+  versionPriority: 100
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: vllm-queue-pm
+  namespace: default
+  labels:
+    test-suite: ccc-res-dws
+spec:
+  selector:
+    matchLabels:
+      app: vllm-custom-metrics-adapter
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-inference-test
+  namespace: default
+  labels:
+    app: vllm-inference-test
+    test-suite: ccc-res-dws
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-inference-test
+  template:
+    metadata:
+      labels:
+        app: vllm-inference-test
+        test-suite: ccc-res-dws
+    spec:
+      nodeSelector:
+        cloud.google.com/compute-class: g4-inference-res-dws
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: vllm-worker
+          image: python:3.11-slim
+          command: ["python3", "-c", "import time; print('vLLM GPU inference worker running'); time.sleep(86400)"]
+          resources:
+            requests:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: "2"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-queue-hpa
+  namespace: default
+  labels:
+    test-suite: ccc-res-dws
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-inference-test
+  minReplicas: 1
+  maxReplicas: 3
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+  metrics:
+    - type: Object
+      object:
+        describedObject:
+          apiVersion: v1
+          kind: Service
+          name: vllm-custom-metrics-svc
+        metric:
+          name: vllm_num_requests_waiting
+        target:
+          type: AverageValue
+          averageValue: "5"
