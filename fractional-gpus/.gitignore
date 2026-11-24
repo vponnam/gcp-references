@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+*.log
+bench/active_reservation.env
+bench/results_*.json
+bench/local_scorecard.md
+.env.local
