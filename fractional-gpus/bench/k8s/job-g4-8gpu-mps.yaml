@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: matmul-g4-8gpu-mps
+  namespace: gpu-bench
+  labels:
+    owner: gpu-bench
+    app: matmul-bench
+    bench-tier: g4-8gpu-mps
+spec:
+  # 4 MPS clients per GPU * 8 GPUs = 32 concurrent pods on 1 x g4-standard-384 node
+  completions: 32
+  parallelism: 32
+  completionMode: Indexed
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        owner: gpu-bench
+        app: matmul-bench
+        bench-tier: g4-8gpu-mps
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        bench-pool: gpu-bench-g4-8gpu-mps
+        cloud.google.com/gke-gpu-sharing-strategy: "mps"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: cloud.google.com/gke-spot
+          operator: Exists
+          effect: NoSchedule
+        - key: cloud.google.com/gke-queued
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: matmul-bench
+          image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+          command: ["bash", "-c", "nvidia-smi -L && python3 /bench/matmul_bench.py --tier g4-8gpu-mps"]
+          envFrom:
+            - configMapRef:
+                name: bench-params
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "10"
+              memory: "36Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: bench-script
+              mountPath: /bench
+              readOnly: true
+      volumes:
+        - name: bench-script
+          configMap:
+            name: bench-script

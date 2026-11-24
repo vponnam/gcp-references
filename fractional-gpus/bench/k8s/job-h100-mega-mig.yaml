@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: matmul-h100-mega-mig
+  namespace: gpu-bench
+  labels:
+    owner: gpu-bench
+    app: matmul-bench
+    bench-tier: h100-mega-mig
+spec:
+  # 3 x 2g.20gb per GPU * 8 GPUs = 24 isolated slices on 1 x a3-megagpu-8g node
+  completions: 24
+  parallelism: 24
+  completionMode: Indexed
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        owner: gpu-bench
+        app: matmul-bench
+        bench-tier: h100-mega-mig
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        bench-pool: gpu-bench-h100-mega-mig
+        cloud.google.com/gke-gpu-partition-size: "2g.20gb"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: cloud.google.com/gke-spot
+          operator: Exists
+          effect: NoSchedule
+        - key: cloud.google.com/gke-queued
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: matmul-bench
+          image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+          command: ["bash", "-c", "nvidia-smi -L && python3 /bench/matmul_bench.py --tier h100-mega-mig"]
+          envFrom:
+            - configMapRef:
+                name: bench-params
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "7"
+              memory: "64Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: bench-script
+              mountPath: /bench
+              readOnly: true
+      volumes:
+        - name: bench-script
+          configMap:
+            name: bench-script
